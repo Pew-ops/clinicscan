@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
+<title>ClinicScan</title>
+<style>
+:root{--bg:#f4f6f8;--card:#fff;--tx:#111827;--mut:#6b7280;--pri:#0f766e;--bd:#e5e7eb;--dan:#b91c1c}
+@media(prefers-color-scheme:dark){:root{--bg:#0b1114;--card:#131c20;--tx:#e5e7eb;--mut:#9ca3af;--bd:#243036}}
+*{box-sizing:border-box}
+body{margin:0;font:16px system-ui,sans-serif;background:var(--bg);color:var(--tx);padding:env(safe-area-inset-top) 0 80px}
+header{padding:16px;font-weight:700;font-size:20px;color:var(--pri)}
+main{padding:0 12px;max-width:640px;margin:auto}
+section{display:none}section.on{display:block}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:14px;margin-bottom:12px}
+video,canvas{width:100%;border-radius:10px;background:#000;display:none}
+video.on{display:block}
+label{display:block;font-size:13px;color:var(--mut);margin:10px 0 4px}
+input{width:100%;padding:12px;font-size:16px;border:1px solid var(--bd);border-radius:10px;background:var(--bg);color:var(--tx)}
+button{padding:13px 14px;font-size:16px;font-weight:600;border:0;border-radius:10px;background:var(--pri);color:#fff;width:100%;margin-top:8px}
+button.alt{background:transparent;color:var(--pri);border:1px solid var(--pri)}
+button.del{background:transparent;color:var(--dan);width:auto;padding:4px 8px;margin:0}
+.row{display:flex;gap:8px}.row>*{flex:1}
+#status{font-size:14px;color:var(--mut);min-height:20px;margin-top:8px}
+.tw{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--bd);white-space:nowrap}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--card);border-top:1px solid var(--bd);padding-bottom:env(safe-area-inset-bottom)}
+nav button{background:none;color:var(--mut);border-radius:0;margin:0;padding:14px 0}
+nav button.on{color:var(--pri)}
+#toast{position:fixed;left:12px;right:12px;bottom:90px;background:#111;color:#fff;padding:12px;border-radius:10px;display:none;text-align:center}
+small{color:var(--mut)}
+</style>
+</head>
+<body>
+<header>ClinicScan</header>
+<main>
+<section id="scan" class="on">
+  <div class="card">
+    <video id="vid" playsinline muted></video>
+    <canvas id="cv"></canvas>
+    <button id="openCam">Open camera</button>
+    <button id="snap" class="alt" style="display:none">Capture &amp; read ID</button>
+    <button id="pick" class="alt">Take / choose photo instead</button>
+    <input id="file" type="file" accept="image/*" capture="environment" hidden>
+    <div id="status"></div>
+  </div>
+  <div class="card">
+    <label>Student ID</label><input id="id" inputmode="numeric" autocomplete="off">
+    <label>Student name</label><input id="name" autocomplete="off">
+    <label>Date availed (text, YYYY-MM-DD)</label><input id="date">
+    <button id="save">Save record</button>
+    <small>Photos are read on this phone and never uploaded or stored.</small>
+  </div>
+</section>
+<section id="log">
+  <div class="card">
+    <div id="count"></div>
+    <button id="export">Download Excel (.xlsx)</button>
+  </div>
+  <div class="card tw"><table><thead><tr><th>student id</th><th>student name</th><th>date availed</th><th></th></tr></thead><tbody id="rows"></tbody></table></div>
+</section>
+<section id="data">
+  <div class="card">
+    <b>Student list</b><br><small>Names are learned automatically after a student's first visit. You can also import an Excel/CSV with columns: student id, student name.</small>
+    <div id="scount" style="margin-top:8px"></div>
+    <button id="imp" class="alt">Import student list</button>
+    <input id="impfile" type="file" accept=".xlsx,.xls,.csv" hidden>
+    <button id="wipe" class="alt" style="color:var(--dan);border-color:var(--dan)">Delete all data on this phone</button>
+  </div>
+</section>
+</main>
+<div id="toast"></div>
+<nav><button data-t="scan" class="on">Scan</button><button data-t="log">Log</button><button data-t="data">Students</button></nav>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+const $=s=>document.querySelector(s);
+const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}};
+const put=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
+let students=get('cs_students',{}),visits=get('cs_visits',[]),stream=null;
+const p2=n=>String(n).padStart(2,'0');
+const today=()=>{const d=new Date();return `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())}`};
+const toast=m=>{const t=$('#toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2500)};
+const status=m=>$('#status').textContent=m;
+
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button,section').forEach(e=>e.classList.remove('on'));
+  b.classList.add('on');$('#'+b.dataset.t).classList.add('on');
+});
+
+/* ---------- camera ---------- */
+$('#openCam').onclick=async()=>{
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280}}});
+    $('#vid').srcObject=stream;$('#vid').classList.add('on');await $('#vid').play();
+    $('#openCam').style.display='none';$('#snap').style.display='block';
+  }catch(e){status('Camera not available. Use "Take / choose photo" instead.')}
+};
+$('#snap').onclick=()=>{
+  const v=$('#vid'),c=$('#cv');c.width=v.videoWidth;c.height=v.videoHeight;
+  c.getContext('2d').drawImage(v,0,0);readCanvas(c);
+};
+$('#pick').onclick=()=>$('#file').click();
+$('#file').onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  const bmp=await createImageBitmap(f),c=$('#cv'),sc=Math.min(1,1800/bmp.width);
+  c.width=bmp.width*sc;c.height=bmp.height*sc;c.getContext('2d').drawImage(bmp,0,0,c.width,c.height);
+  readCanvas(c);e.target.value='';
+};
+
+/* ---------- OCR + barcode ---------- */
+async function readCanvas(c){
+  status('Reading ID card…');let code='';
+  if('BarcodeDetector' in window){
+    try{for(const b of await new BarcodeDetector().detect(c)){const m=b.rawValue.match(/\d{6}/);if(m){code=m[0];break}}}catch{}
+  }
+  try{
+    const r=await Tesseract.recognize(c,'eng');
+    parse(r.data.text,code);
+  }catch(e){status('Could not read the card. Type it manually or retake the photo.')}
+}
+function parse(text,code){
+  const lines=text.split('\n').map(s=>s.trim()).filter(Boolean);
+  const id=code||(text.match(/\b\d{6}\b/)||[])[0]||'';
+  const cand=lines.filter(l=>/^[A-Za-zÑñ.,'\- ]{6,}$/.test(l)&&l.trim().split(/\s+/).length>=2);
+  let name=(cand.find(l=>l.includes(','))||[...cand].sort((a,b)=>b.length-a.length)[0]||'').toUpperCase();
+  $('#id').value=id;
+  $('#name').value=students[id]||name;
+  status(id?(students[id]?'Known student — name filled from list.':'New student — check the name, then save.'):'ID number not found. Please type it.');
+}
+$('#id').oninput=e=>{const n=students[e.target.value.trim()];if(n)$('#name').value=n};
+
+/* ---------- save / log ---------- */
+$('#date').value=today();
+$('#save').onclick=()=>{
+  const id=$('#id').value.trim(),name=$('#name').value.trim().toUpperCase(),date=$('#date').value.trim();
+  if(!/^\d{4,}$/.test(id)||!name||!/^\d{4}-\d{2}-\d{2}$/.test(date))return toast('Check ID, name and date (YYYY-MM-DD)');
+  if(visits.some(v=>v.id===id&&v.date===date)&&!confirm('Already recorded for this date. Save again?'))return;
+  students[id]=name;visits.push({id,name,date});put('cs_students',students);put('cs_visits',visits);
+  $('#id').value='';$('#name').value='';$('#date').value=today();status('');render();toast('Saved ✔');
+};
+function render(){
+  $('#count').textContent=visits.length+' record(s)';
+  $('#scount').textContent=Object.keys(students).length+' student(s) known';
+  $('#rows').innerHTML=visits.map((v,i)=>`<tr><td>${v.id}</td><td>${v.name.replace(/</g,'&lt;')}</td><td>${v.date}</td><td><button class="del" data-i="${i}">✕</button></td></tr>`).join('');
+}
+$('#rows').onclick=e=>{const i=e.target.dataset.i;if(i!==undefined&&confirm('Delete this record?')){visits.splice(i,1);put('cs_visits',visits);render()}};
+
+/* ---------- Excel export (everything stored as text) ---------- */
+$('#export').onclick=()=>{
+  if(!visits.length)return toast('No records yet');
+  const ws=XLSX.utils.aoa_to_sheet([['student id','student name','date availed'],...visits.map(v=>[String(v.id),v.name,String(v.date)])]);
+  for(const a in ws){if(a[0]!=='!'){ws[a].t='s';ws[a].z='@'}}
+  ws['!cols']=[{wch:14},{wch:38},{wch:16}];
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Sheet1');
+  XLSX.writeFile(wb,`dispensed_medicine_log_${today()}.xlsx`);
+};
+
+/* ---------- import student list / wipe ---------- */
+$('#imp').onclick=()=>$('#impfile').click();
+$('#impfile').onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  const wb=XLSX.read(await f.arrayBuffer()),rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,raw:false});
+  let n=0;for(const r of rows){const id=String(r[0]??'').trim(),nm=String(r[1]??'').trim();if(/^\d{4,}$/.test(id)&&nm){students[id]=nm.toUpperCase();n++}}
+  put('cs_students',students);render();toast(n+' students imported');e.target.value='';
+};
+$('#wipe').onclick=()=>{if(confirm('Delete ALL records and student names on this phone?')){students={};visits=[];localStorage.removeItem('cs_students');localStorage.removeItem('cs_visits');render()}};
+render();
+</script>
+</body>
+</html>
